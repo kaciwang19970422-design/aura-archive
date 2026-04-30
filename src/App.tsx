@@ -401,7 +401,10 @@ export default function App() {
     const previousItems = items;
     setItems((current) => current.filter((item) => item.id !== itemId));
 
-    if (!user || user.id === 'mock_user') return;
+    if (!user || user.id === 'mock_user' || !isDatabaseId(itemId)) {
+      setSyncMessage(null);
+      return;
+    }
 
     const { error } = await supabase
       .from('items')
