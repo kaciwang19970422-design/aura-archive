@@ -3,7 +3,7 @@ import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { 
   Plus, FolderPlus, Image as ImageIcon, 
   Search, X, ChevronRight, ChevronDown, 
-  MoreHorizontal, Folder, Home, LogOut, Upload, Link
+  MoreHorizontal, Folder, Home, LogOut, Upload, Link, Pencil
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -80,8 +80,12 @@ const getSavedItems = () => {
   return saved ? JSON.parse(saved) as AestheticItem[] : INITIAL_ITEMS;
 };
 
+const getRootCategory = () => (
+  getSavedCategories().find((category) => category.id === ROOT_CATEGORY_ID) || INITIAL_CATEGORIES[0]
+);
+
 const withRootCategory = (categories: Category[]) => [
-  INITIAL_CATEGORIES[0],
+  getRootCategory(),
   ...categories.filter((category) => category.id !== ROOT_CATEGORY_ID),
 ];
 
@@ -146,7 +150,10 @@ export default function App() {
   const [newItemTitle, setNewItemTitle] = useState('');
   const [newItemFile, setNewItemFile] = useState<File | null>(null);
   const [newItemPreview, setNewItemPreview] = useState<string | null>(null);
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [editedCategoryName, setEditedCategoryName] = useState('');
   const [editedItemTitle, setEditedItemTitle] = useState('');
+  const skipCategoryRenameOnBlurRef = useRef(false);
   const skipRenameOnBlurRef = useRef(false);
 
   useEffect(() => {
@@ -318,6 +325,58 @@ export default function App() {
     if (!newItemTitle.trim()) {
       setNewItemTitle(file.name.replace(/\.[^/.]+$/, ''));
     }
+  };
+
+  const openRenameCategory = (category: Category) => {
+    skipCategoryRenameOnBlurRef.current = false;
+    setEditingCategoryId(category.id);
+    setEditedCategoryName(category.name);
+  };
+
+  const cancelRenameCategory = () => {
+    skipCategoryRenameOnBlurRef.current = true;
+    setEditingCategoryId(null);
+    setEditedCategoryName('');
+  };
+
+  const renameCategory = async (force = false) => {
+    if (skipCategoryRenameOnBlurRef.current && !force) {
+      skipCategoryRenameOnBlurRef.current = false;
+      return;
+    }
+
+    if (!editingCategoryId) return;
+    const nextName = editedCategoryName.trim();
+    if (!nextName) {
+      cancelRenameCategory();
+      return;
+    }
+
+    const previousCategories = categories;
+    setIsSaving(true);
+    setCategories((current) => current.map((category) => (
+      category.id === editingCategoryId ? { ...category, name: nextName } : category
+    )));
+
+    if (user && user.id !== 'mock_user' && isDatabaseId(editingCategoryId)) {
+      const { error } = await supabase
+        .from('categories')
+        .update({ name: nextName })
+        .eq('id', editingCategoryId)
+        .eq('user_id', user.id);
+
+      if (error) {
+        setCategories(previousCategories);
+        setSyncMessage('Could not rename that folder. Please try again.');
+        setIsSaving(false);
+        return;
+      }
+    }
+
+    setSyncMessage(null);
+    setEditingCategoryId(null);
+    setEditedCategoryName('');
+    setIsSaving(false);
   };
 
   const openRenameItem = (item: AestheticItem) => {
@@ -525,6 +584,12 @@ export default function App() {
                 parentId={null} 
                 activeId={activeCategoryId} 
                 onSelect={setActiveCategoryId} 
+                editingId={editingCategoryId}
+                editedName={editedCategoryName}
+                onEditedNameChange={setEditedCategoryName}
+                onRenameStart={openRenameCategory}
+                onRenameSave={renameCategory}
+                onRenameCancel={cancelRenameCategory}
                 level={0}
               />
             </div>
@@ -840,11 +905,29 @@ export default function App() {
 
 // --- Helper Components ---
 
-function CategoryNode({ categories, parentId, activeId, onSelect, level }: { 
+function CategoryNode({
+  categories,
+  parentId,
+  activeId,
+  onSelect,
+  editingId,
+  editedName,
+  onEditedNameChange,
+  onRenameStart,
+  onRenameSave,
+  onRenameCancel,
+  level,
+}: { 
   categories: Category[], 
   parentId: string | null, 
   activeId: string, 
   onSelect: (id: string) => void,
+  editingId: string | null,
+  editedName: string,
+  onEditedNameChange: (name: string) => void,
+  onRenameStart: (category: Category) => void,
+  onRenameSave: (force?: boolean) => void,
+  onRenameCancel: () => void,
   level: number
 }) {
   const nodes = categories.filter(c => c.parentId === parentId);
@@ -861,6 +944,7 @@ function CategoryNode({ categories, parentId, activeId, onSelect, level }: {
         const hasChildren = categories.some(c => c.parentId === node.id);
         const isActive = activeId === node.id;
         const isExpanded = expanded[node.id];
+        const isEditing = editingId === node.id;
 
         return (
           <div key={node.id}>
@@ -882,8 +966,58 @@ function CategoryNode({ categories, parentId, activeId, onSelect, level }: {
                   <div className="w-4 h-4 shrink-0" />
                 )}
                 {node.id === 'all' ? <Home className="w-4 h-4" /> : <Folder className={cn("w-4 h-4", isActive ? "text-white/50" : "text-gray-300")} />}
-                <span className="text-sm font-medium truncate">{node.name}</span>
+                {isEditing ? (
+                  <input
+                    autoFocus
+                    value={editedName}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => onEditedNameChange(e.target.value)}
+                    onBlur={() => onRenameSave()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onRenameSave(true);
+                      }
+                      if (e.key === 'Escape') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onRenameCancel();
+                      }
+                    }}
+                    className={cn(
+                      "min-w-0 flex-1 rounded-md px-2 py-1 text-sm font-medium outline-none ring-1",
+                      isActive ? "bg-white text-fg ring-white/30" : "bg-white text-fg ring-gray-200"
+                    )}
+                  />
+                ) : (
+                  <span className="text-sm font-medium truncate">{node.name}</span>
+                )}
               </div>
+              {!isEditing && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  title="Rename folder"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRenameStart(node);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onRenameStart(node);
+                    }
+                  }}
+                  className={cn(
+                    "shrink-0 rounded-full p-1 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100",
+                    isActive ? "text-white/60 hover:bg-white/10 hover:text-white" : "text-gray-300 hover:bg-gray-100 hover:text-fg"
+                  )}
+                >
+                  <Pencil className="h-3 w-3" />
+                </span>
+              )}
             </button>
             {hasChildren && isExpanded && (
               <CategoryNode 
@@ -891,6 +1025,12 @@ function CategoryNode({ categories, parentId, activeId, onSelect, level }: {
                 parentId={node.id} 
                 activeId={activeId} 
                 onSelect={onSelect} 
+                editingId={editingId}
+                editedName={editedName}
+                onEditedNameChange={onEditedNameChange}
+                onRenameStart={onRenameStart}
+                onRenameSave={onRenameSave}
+                onRenameCancel={onRenameCancel}
                 level={level + 1}
               />
             )}
