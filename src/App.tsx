@@ -3,7 +3,7 @@ import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { 
   Plus, FolderPlus, Image as ImageIcon, 
   Search, X, ChevronRight, ChevronDown, 
-  MoreHorizontal, Folder, Home, LogOut
+  MoreHorizontal, Folder, Home, LogOut, Upload, Link
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -68,6 +68,7 @@ const INITIAL_ITEMS: AestheticItem[] = [
 const ROOT_CATEGORY_ID = 'all';
 const LOCAL_CATEGORIES_KEY = 'aura_nested_categories';
 const LOCAL_ITEMS_KEY = 'aura_nested_items';
+const STORAGE_BUCKET = 'aura-assets';
 
 const getSavedCategories = () => {
   const saved = localStorage.getItem(LOCAL_CATEGORIES_KEY);
@@ -86,6 +87,26 @@ const withRootCategory = (categories: Category[]) => [
 
 const isDatabaseId = (id: string | null) => (
   Boolean(id?.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i))
+);
+
+const getFileExtension = (file: File) => {
+  const nameExtension = file.name.split('.').pop();
+  if (nameExtension && nameExtension !== file.name) return nameExtension.toLowerCase();
+  return file.type.split('/').pop() || 'jpg';
+};
+
+const getImageAspect = (url: string): Promise<AestheticItem['aspect']> => (
+  new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      const ratio = image.naturalWidth / image.naturalHeight;
+      if (ratio > 1.2) resolve('landscape');
+      else if (ratio < 0.8) resolve('portrait');
+      else resolve('square');
+    };
+    image.onerror = () => resolve('square');
+    image.src = url;
+  })
 );
 
 const toCategory = (category: DatabaseCategory): Category => ({
@@ -122,6 +143,8 @@ export default function App() {
   const [newItemUrl, setNewItemUrl] = useState('');
   const [newItemSourceUrl, setNewItemSourceUrl] = useState('');
   const [newItemTitle, setNewItemTitle] = useState('');
+  const [newItemFile, setNewItemFile] = useState<File | null>(null);
+  const [newItemPreview, setNewItemPreview] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -268,19 +291,83 @@ export default function App() {
     setIsSaving(false);
   };
 
+  const resetItemForm = () => {
+    setNewItemUrl('');
+    setNewItemSourceUrl('');
+    setNewItemTitle('');
+    setNewItemFile(null);
+    if (newItemPreview) URL.revokeObjectURL(newItemPreview);
+    setNewItemPreview(null);
+  };
+
+  const handleItemFileChange = (file: File | null) => {
+    if (newItemPreview) URL.revokeObjectURL(newItemPreview);
+
+    setNewItemFile(file);
+    setNewItemUrl('');
+
+    if (!file) {
+      setNewItemPreview(null);
+      return;
+    }
+
+    setNewItemPreview(URL.createObjectURL(file));
+    if (!newItemTitle.trim()) {
+      setNewItemTitle(file.name.replace(/\.[^/.]+$/, ''));
+    }
+  };
+
   const addItem = async () => {
-    if (!newItemUrl.trim()) return;
+    if (!newItemFile && !newItemUrl.trim()) {
+      setSyncMessage('Choose an image file or paste an image URL first.');
+      return;
+    }
     setIsSaving(true);
 
     const categoryId = isDatabaseId(activeCategoryId) ? activeCategoryId : null;
+    const previewUrl = newItemFile ? URL.createObjectURL(newItemFile) : newItemUrl.trim();
+    let assetUrl = newItemUrl.trim();
+
+    if (newItemFile) {
+      if (user && user.id !== 'mock_user') {
+        const filePath = `${user.id}/${crypto.randomUUID()}.${getFileExtension(newItemFile)}`;
+        const { error: uploadError } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .upload(filePath, newItemFile, {
+            cacheControl: '3600',
+            upsert: false,
+            contentType: newItemFile.type,
+          });
+
+        if (uploadError) {
+          URL.revokeObjectURL(previewUrl);
+          setSyncMessage('Could not upload the image. Check the Supabase Storage bucket and policies.');
+          setIsSaving(false);
+          return;
+        }
+
+        const { data } = supabase.storage
+          .from(STORAGE_BUCKET)
+          .getPublicUrl(filePath);
+
+        assetUrl = data.publicUrl;
+      } else {
+        assetUrl = previewUrl;
+      }
+    }
+
     const newItem: AestheticItem = {
       id: crypto.randomUUID(),
-      url: newItemUrl.trim(),
+      url: assetUrl,
       sourceUrl: newItemSourceUrl.trim() || undefined,
-      title: newItemTitle.trim() || 'Untitled',
+      title: newItemTitle.trim() || newItemFile?.name.replace(/\.[^/.]+$/, '') || 'Untitled',
       categoryId,
-      aspect: Math.random() > 0.6 ? 'portrait' : Math.random() > 0.3 ? 'square' : 'landscape'
+      aspect: await getImageAspect(previewUrl),
     };
+
+    if (newItemFile && user?.id !== 'mock_user') {
+      URL.revokeObjectURL(previewUrl);
+    }
 
     if (user && user.id !== 'mock_user') {
       const { data, error } = await supabase
@@ -305,9 +392,7 @@ export default function App() {
     }
 
     setItems((current) => [newItem, ...current]);
-    setNewItemUrl('');
-    setNewItemSourceUrl('');
-    setNewItemTitle('');
+    resetItemForm();
     setIsAddModalOpen(false);
     setIsSaving(false);
   };
@@ -538,7 +623,7 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => { setIsCatModalOpen(false); setIsAddModalOpen(false); }}
+              onClick={() => { setIsCatModalOpen(false); setIsAddModalOpen(false); resetItemForm(); }}
               className="absolute inset-0 bg-black/40 backdrop-blur-sm" 
             />
             <motion.div 
@@ -548,7 +633,7 @@ export default function App() {
               className="relative bg-white w-full max-w-lg rounded-[3rem] shadow-2xl overflow-hidden p-12"
             >
               <button 
-                onClick={() => { setIsCatModalOpen(false); setIsAddModalOpen(false); }}
+                onClick={() => { setIsCatModalOpen(false); setIsAddModalOpen(false); resetItemForm(); }}
                 className="absolute top-8 right-8 p-2 text-gray-300 hover:text-fg transition-colors"
               >
                 <X className="w-6 h-6" />
@@ -586,14 +671,44 @@ export default function App() {
                     <p className="text-sm text-gray-400">Capturing aesthetic to {categories.find(c => c.id === activeCategoryId)?.name || 'Archive'}</p>
                   </div>
                   <div className="space-y-4">
-                    <input 
-                      autoFocus
-                      type="text" 
-                      placeholder="Asset URL (Image link)"
-                      className="w-full bg-gray-50 border-none p-6 rounded-2xl outline-none focus:ring-1 focus:ring-fg"
-                      value={newItemUrl}
-                      onChange={(e) => setNewItemUrl(e.target.value)}
-                    />
+                    <label className="block cursor-pointer rounded-3xl border border-dashed border-gray-200 bg-gray-50 p-4 transition-colors hover:border-fg/30 hover:bg-white">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="sr-only"
+                        onChange={(event) => handleItemFileChange(event.target.files?.[0] || null)}
+                      />
+                      {newItemPreview ? (
+                        <div className="flex items-center gap-4">
+                          <img src={newItemPreview} alt="Upload preview" className="h-20 w-20 rounded-2xl object-cover" />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{newItemFile?.name}</p>
+                            <p className="mt-1 text-xs text-gray-400">Click to choose a different image</p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-4 p-2">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white">
+                            <Upload className="h-5 w-5 text-gray-400" />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">Upload image</p>
+                            <p className="mt-1 text-xs text-gray-400">JPG, PNG, GIF, or WebP</p>
+                          </div>
+                        </div>
+                      )}
+                    </label>
+                    <div className="relative">
+                      <Link className="absolute left-5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-300" />
+                      <input 
+                        type="text" 
+                        placeholder="Or paste an image URL"
+                        className="w-full bg-gray-50 border-none py-6 pl-12 pr-6 rounded-2xl outline-none focus:ring-1 focus:ring-fg disabled:opacity-50"
+                        value={newItemUrl}
+                        disabled={Boolean(newItemFile)}
+                        onChange={(e) => setNewItemUrl(e.target.value)}
+                      />
+                    </div>
                     <input 
                       type="text" 
                       placeholder="Source URL (Pinterest, etc.)"

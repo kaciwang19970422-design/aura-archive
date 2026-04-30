@@ -56,3 +56,34 @@ create policy "Users can update their own items" on public.items
 create policy "Users can delete their own items" on public.items
   for delete using (auth.uid() = user_id);
 ```
+
+## 3. Storage Bucket
+
+Create a public bucket named `aura-assets` for uploaded images. Each file is stored under the user's auth id, for example `USER_ID/image-id.jpg`.
+
+```sql
+insert into storage.buckets (id, name, public)
+values ('aura-assets', 'aura-assets', true)
+on conflict (id) do update set public = true;
+
+create policy "Aura assets are publicly readable" on storage.objects
+  for select using (bucket_id = 'aura-assets');
+
+create policy "Users can upload their own aura assets" on storage.objects
+  for insert with check (
+    bucket_id = 'aura-assets'
+    and auth.uid()::text = (storage.foldername(name))[1]
+  );
+
+create policy "Users can update their own aura assets" on storage.objects
+  for update using (
+    bucket_id = 'aura-assets'
+    and auth.uid()::text = (storage.foldername(name))[1]
+  );
+
+create policy "Users can delete their own aura assets" on storage.objects
+  for delete using (
+    bucket_id = 'aura-assets'
+    and auth.uid()::text = (storage.foldername(name))[1]
+  );
+```
