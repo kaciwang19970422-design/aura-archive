@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import type { User } from '@supabase/supabase-js';
 import Auth from './components/Auth';
 import { supabase } from './lib/supabase';
 
@@ -26,8 +27,25 @@ interface AestheticItem {
   url: string;
   sourceUrl?: string;
   title: string;
-  categoryId: string;
+  categoryId: string | null;
   aspect: 'portrait' | 'landscape' | 'square';
+}
+
+interface DatabaseCategory {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  user_id: string;
+}
+
+interface DatabaseItem {
+  id: string;
+  title: string | null;
+  url: string;
+  source_url: string | null;
+  aspect: AestheticItem['aspect'] | null;
+  category_id: string | null;
+  user_id: string;
 }
 
 // --- Initial Data ---
@@ -47,22 +65,57 @@ const INITIAL_ITEMS: AestheticItem[] = [
   { id: '4', categoryId: '2-1', url: 'https://images.unsplash.com/photo-1517646287270-a5a9ca602e5c?q=80&w=800', sourceUrl: 'https://unsplash.com/photos/stones-on-sand-7_T_A-H8', title: 'Zen Stones', aspect: 'portrait' },
 ];
 
-export default function App() {
-  const [user, setUser] = useState<any>(null);
-  const [categories, setCategories] = useState<Category[]>(() => {
-    const saved = localStorage.getItem('aura_nested_categories');
-    return saved ? JSON.parse(saved) : INITIAL_CATEGORIES;
-  });
-  
-  const [items, setItems] = useState<AestheticItem[]>(() => {
-    const saved = localStorage.getItem('aura_nested_items');
-    return saved ? JSON.parse(saved) : INITIAL_ITEMS;
-  });
+const ROOT_CATEGORY_ID = 'all';
+const LOCAL_CATEGORIES_KEY = 'aura_nested_categories';
+const LOCAL_ITEMS_KEY = 'aura_nested_items';
 
-  const [activeCategoryId, setActiveCategoryId] = useState('all');
+const getSavedCategories = () => {
+  const saved = localStorage.getItem(LOCAL_CATEGORIES_KEY);
+  return saved ? JSON.parse(saved) as Category[] : INITIAL_CATEGORIES;
+};
+
+const getSavedItems = () => {
+  const saved = localStorage.getItem(LOCAL_ITEMS_KEY);
+  return saved ? JSON.parse(saved) as AestheticItem[] : INITIAL_ITEMS;
+};
+
+const withRootCategory = (categories: Category[]) => [
+  INITIAL_CATEGORIES[0],
+  ...categories.filter((category) => category.id !== ROOT_CATEGORY_ID),
+];
+
+const isDatabaseId = (id: string | null) => (
+  Boolean(id?.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i))
+);
+
+const toCategory = (category: DatabaseCategory): Category => ({
+  id: category.id,
+  name: category.name,
+  parentId: category.parent_id ?? ROOT_CATEGORY_ID,
+});
+
+const toItem = (item: DatabaseItem): AestheticItem => ({
+  id: item.id,
+  title: item.title || 'Untitled',
+  url: item.url,
+  sourceUrl: item.source_url || undefined,
+  aspect: item.aspect || 'square',
+  categoryId: item.category_id,
+});
+
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [categories, setCategories] = useState<Category[]>(getSavedCategories);
+  const [items, setItems] = useState<AestheticItem[]>(getSavedItems);
+
+  const [activeCategoryId, setActiveCategoryId] = useState(ROOT_CATEGORY_ID);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isCatModalOpen, setIsCatModalOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isLibraryLoading, setIsLibraryLoading] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Form States
   const [newCatName, setNewCatName] = useState('');
@@ -70,7 +123,6 @@ export default function App() {
   const [newItemSourceUrl, setNewItemSourceUrl] = useState('');
   const [newItemTitle, setNewItemTitle] = useState('');
 
-  // Handle Supabase Session
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
@@ -84,9 +136,55 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('aura_nested_categories', JSON.stringify(categories));
-    localStorage.setItem('aura_nested_items', JSON.stringify(items));
+    localStorage.setItem(LOCAL_CATEGORIES_KEY, JSON.stringify(categories));
+    localStorage.setItem(LOCAL_ITEMS_KEY, JSON.stringify(items));
   }, [categories, items]);
+
+  useEffect(() => {
+    if (!user || user.id === 'mock_user') return;
+
+    let isMounted = true;
+
+    const loadLibrary = async () => {
+      setIsLibraryLoading(true);
+      setSyncMessage(null);
+
+      const [categoryResult, itemResult] = await Promise.all([
+        supabase
+          .from('categories')
+          .select('id, name, parent_id, user_id')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: true }),
+        supabase
+          .from('items')
+          .select('id, title, url, source_url, aspect, category_id, user_id')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false }),
+      ]);
+
+      if (!isMounted) return;
+
+      if (categoryResult.error || itemResult.error) {
+        setSyncMessage('Database is not ready yet. Changes are saved locally on this device.');
+        setIsLibraryLoading(false);
+        return;
+      }
+
+      const loadedCategories = withRootCategory((categoryResult.data || []).map(toCategory));
+      const loadedItems = (itemResult.data || []).map(toItem);
+
+      setCategories(loadedCategories.length > 1 ? loadedCategories : INITIAL_CATEGORIES);
+      setItems(loadedItems.length > 0 ? loadedItems : INITIAL_ITEMS);
+      setActiveCategoryId(ROOT_CATEGORY_ID);
+      setIsLibraryLoading(false);
+    };
+
+    loadLibrary();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user]);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -104,10 +202,23 @@ export default function App() {
   };
 
   const filteredItems = useMemo(() => {
-    if (activeCategoryId === 'all') return items;
-    const targetIds = [activeCategoryId, ...getAllChildIds(activeCategoryId)];
-    return items.filter(i => targetIds.includes(i.categoryId));
-  }, [activeCategoryId, items, categories]);
+    const targetIds = activeCategoryId === ROOT_CATEGORY_ID
+      ? null
+      : [activeCategoryId, ...getAllChildIds(activeCategoryId)];
+    const scopedItems = targetIds
+      ? items.filter(i => targetIds.includes(i.categoryId || ''))
+      : items;
+    const query = searchQuery.trim().toLowerCase();
+
+    if (!query) return scopedItems;
+
+    return scopedItems.filter((item) => {
+      const categoryName = categories.find((category) => category.id === item.categoryId)?.name || 'Archive';
+      return [item.title, item.url, item.sourceUrl, categoryName]
+        .filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(query));
+    });
+  }, [activeCategoryId, items, categories, searchQuery]);
 
   const breadcrumbs = useMemo(() => {
     const path: Category[] = [];
@@ -119,33 +230,106 @@ export default function App() {
     return path;
   }, [activeCategoryId, categories]);
 
-  const addCategory = () => {
+  const addCategory = async () => {
     if (!newCatName.trim()) return;
+    setIsSaving(true);
+
+    const parentId = activeCategoryId === ROOT_CATEGORY_ID ? ROOT_CATEGORY_ID : activeCategoryId;
+    const databaseParentId = isDatabaseId(parentId) ? parentId : null;
     const newCat: Category = { 
-      id: Date.now().toString(), 
-      name: newCatName, 
-      parentId: activeCategoryId === 'all' ? 'all' : activeCategoryId 
+      id: crypto.randomUUID(), 
+      name: newCatName.trim(), 
+      parentId,
     };
-    setCategories([...categories, newCat]);
+
+    if (user && user.id !== 'mock_user') {
+      const { data, error } = await supabase
+        .from('categories')
+        .insert({
+          name: newCat.name,
+          parent_id: databaseParentId,
+          user_id: user.id,
+        })
+        .select('id, name, parent_id, user_id')
+        .single();
+
+      if (error) {
+        setSyncMessage('Could not sync the new folder. It was saved locally.');
+      } else if (data) {
+        newCat.id = data.id;
+        newCat.parentId = data.parent_id ?? ROOT_CATEGORY_ID;
+        setSyncMessage(null);
+      }
+    }
+
+    setCategories((current) => [...current, newCat]);
     setNewCatName('');
     setIsCatModalOpen(false);
+    setIsSaving(false);
   };
 
-  const addItem = () => {
+  const addItem = async () => {
     if (!newItemUrl.trim()) return;
+    setIsSaving(true);
+
+    const categoryId = isDatabaseId(activeCategoryId) ? activeCategoryId : null;
     const newItem: AestheticItem = {
-      id: Date.now().toString(),
-      url: newItemUrl,
-      sourceUrl: newItemSourceUrl || undefined,
-      title: newItemTitle || 'Untitled',
-      categoryId: activeCategoryId === 'all' ? categories[0].id : activeCategoryId,
+      id: crypto.randomUUID(),
+      url: newItemUrl.trim(),
+      sourceUrl: newItemSourceUrl.trim() || undefined,
+      title: newItemTitle.trim() || 'Untitled',
+      categoryId,
       aspect: Math.random() > 0.6 ? 'portrait' : Math.random() > 0.3 ? 'square' : 'landscape'
     };
-    setItems([newItem, ...items]);
+
+    if (user && user.id !== 'mock_user') {
+      const { data, error } = await supabase
+        .from('items')
+        .insert({
+          title: newItem.title,
+          url: newItem.url,
+          source_url: newItem.sourceUrl || null,
+          aspect: newItem.aspect,
+          category_id: newItem.categoryId,
+          user_id: user.id,
+        })
+        .select('id, title, url, source_url, aspect, category_id, user_id')
+        .single();
+
+      if (error) {
+        setSyncMessage('Could not sync the new asset. It was saved locally.');
+      } else if (data) {
+        newItem.id = data.id;
+        setSyncMessage(null);
+      }
+    }
+
+    setItems((current) => [newItem, ...current]);
     setNewItemUrl('');
     setNewItemSourceUrl('');
     setNewItemTitle('');
     setIsAddModalOpen(false);
+    setIsSaving(false);
+  };
+
+  const deleteItem = async (itemId: string) => {
+    const previousItems = items;
+    setItems((current) => current.filter((item) => item.id !== itemId));
+
+    if (!user || user.id === 'mock_user') return;
+
+    const { error } = await supabase
+      .from('items')
+      .delete()
+      .eq('id', itemId)
+      .eq('user_id', user.id);
+
+    if (error) {
+      setItems(previousItems);
+      setSyncMessage('Could not delete that asset from the database. Please try again.');
+    } else {
+      setSyncMessage(null);
+    }
   };
 
   if (!user) {
@@ -195,7 +379,7 @@ export default function App() {
           )}
           {sidebarCollapsed && (
             <div className="flex flex-col items-center gap-6 mt-4">
-              <Home className={cn("w-6 h-6 cursor-pointer", activeCategoryId === 'all' ? "text-fg" : "text-gray-300")} onClick={() => setActiveCategoryId('all')} />
+              <Home className={cn("w-6 h-6 cursor-pointer", activeCategoryId === ROOT_CATEGORY_ID ? "text-fg" : "text-gray-300")} onClick={() => setActiveCategoryId(ROOT_CATEGORY_ID)} />
               <Folder className="w-6 h-6 text-gray-300 hover:text-fg cursor-pointer" />
               <Plus className="w-6 h-6 text-gray-300 hover:text-fg cursor-pointer" onClick={() => setIsAddModalOpen(true)} />
             </div>
@@ -217,13 +401,15 @@ export default function App() {
             </div>
             <button 
               onClick={() => setIsCatModalOpen(true)}
+              disabled={isSaving}
               className="w-full flex items-center justify-center gap-2 py-3 text-xs font-semibold uppercase tracking-widest text-gray-500 hover:text-fg border border-gray-100 rounded-xl transition-all"
             >
               <FolderPlus className="w-4 h-4" /> New Folder
             </button>
             <button 
               onClick={() => setIsAddModalOpen(true)}
-              className="w-full bg-fg text-white py-4 rounded-2xl flex items-center justify-center gap-2 hover:opacity-90 transition-all shadow-xl shadow-black/5"
+              disabled={isSaving}
+              className="w-full bg-fg text-white py-4 rounded-2xl flex items-center justify-center gap-2 hover:opacity-90 transition-all shadow-xl shadow-black/5 disabled:opacity-50"
             >
               <Plus className="w-5 h-5" /> Add Asset
             </button>
@@ -236,7 +422,7 @@ export default function App() {
         {/* Top Breadcrumbs & Nav */}
         <header className="h-20 border-b border-gray-50 px-12 flex items-center justify-between sticky top-0 bg-bg/80 backdrop-blur-md z-30">
           <nav className="flex items-center gap-2 text-sm">
-            <button onClick={() => setActiveCategoryId('all')} className="text-gray-400 hover:text-fg transition-colors">Archive</button>
+            <button onClick={() => setActiveCategoryId(ROOT_CATEGORY_ID)} className="text-gray-400 hover:text-fg transition-colors">Archive</button>
             {breadcrumbs.map((crumb, idx) => (
               <div key={crumb.id} className="flex items-center gap-2">
                 <ChevronRight className="w-3 h-3 text-gray-300" />
@@ -258,6 +444,8 @@ export default function App() {
               <input 
                 type="text" 
                 placeholder="Search Archive..." 
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
                 className="pl-10 pr-4 py-2 bg-gray-50 border-none rounded-full text-xs w-48 focus:w-64 focus:ring-1 focus:ring-fg transition-all outline-none"
               />
             </div>
@@ -268,8 +456,13 @@ export default function App() {
           <div className="max-w-[1600px] mx-auto">
             <header className="mb-12">
               <h2 className="serif text-6xl font-medium tracking-tight">
-                {activeCategoryId === 'all' ? 'The Collective' : categories.find(c => c.id === activeCategoryId)?.name}
+                {activeCategoryId === ROOT_CATEGORY_ID ? 'The Collective' : categories.find(c => c.id === activeCategoryId)?.name}
               </h2>
+              <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-gray-400">
+                <span>{filteredItems.length} assets</span>
+                {isLibraryLoading && <span>Syncing library...</span>}
+                {syncMessage && <span className="text-amber-600">{syncMessage}</span>}
+              </div>
             </header>
 
             {/* Non-symmetric Masonry Layout */}
@@ -304,7 +497,7 @@ export default function App() {
                               {item.aspect}
                             </span>
                             <button 
-                              onClick={(e) => { e.stopPropagation(); setItems(items.filter(i => i.id !== item.id)); }}
+                              onClick={(e) => { e.stopPropagation(); deleteItem(item.id); }}
                               className="p-2 bg-white/10 backdrop-blur-md rounded-full text-white hover:bg-red-500 transition-colors"
                             >
                               <X className="w-4 h-4" />
@@ -315,7 +508,7 @@ export default function App() {
                             <div className="flex items-center gap-2">
                               <Folder className="w-3 h-3 text-white/40" />
                               <p className="text-white/60 text-[10px] uppercase tracking-[0.2em]">
-                                {categories.find(c => c.id === item.categoryId)?.name}
+                                {categories.find(c => c.id === item.categoryId)?.name || 'Archive'}
                               </p>
                             </div>
                           </div>
@@ -378,9 +571,10 @@ export default function App() {
                   />
                   <button 
                     onClick={addCategory}
-                    className="w-full bg-fg text-white py-5 rounded-2xl font-bold tracking-widest uppercase text-xs hover:scale-[0.98] transition-all"
+                    disabled={isSaving}
+                    className="w-full bg-fg text-white py-5 rounded-2xl font-bold tracking-widest uppercase text-xs hover:scale-[0.98] transition-all disabled:opacity-50"
                   >
-                    Create Folder
+                    {isSaving ? 'Saving...' : 'Create Folder'}
                   </button>
                 </div>
               )}
@@ -418,9 +612,10 @@ export default function App() {
                   </div>
                   <button 
                     onClick={addItem}
-                    className="w-full bg-fg text-white py-5 rounded-2xl font-bold tracking-widest uppercase text-xs hover:scale-[0.98] transition-all"
+                    disabled={isSaving}
+                    className="w-full bg-fg text-white py-5 rounded-2xl font-bold tracking-widest uppercase text-xs hover:scale-[0.98] transition-all disabled:opacity-50"
                   >
-                    Preserve Aesthetic
+                    {isSaving ? 'Saving...' : 'Preserve Aesthetic'}
                   </button>
                 </div>
               )}
