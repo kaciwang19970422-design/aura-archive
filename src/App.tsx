@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { 
-  Plus, FolderPlus, Image as ImageIcon, Trash2, 
-  Search, X, ChevronRight, LayoutGrid, ChevronDown, 
+  Plus, FolderPlus, Image as ImageIcon, 
+  Search, X, ChevronRight, ChevronDown, 
   MoreHorizontal, Folder, Home, LogOut
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
