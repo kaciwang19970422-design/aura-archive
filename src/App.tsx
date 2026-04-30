@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { 
   Plus, FolderPlus, Image as ImageIcon, 
@@ -132,6 +132,7 @@ export default function App() {
   const [activeCategoryId, setActiveCategoryId] = useState(ROOT_CATEGORY_ID);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isCatModalOpen, setIsCatModalOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState<AestheticItem | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLibraryLoading, setIsLibraryLoading] = useState(false);
@@ -145,6 +146,8 @@ export default function App() {
   const [newItemTitle, setNewItemTitle] = useState('');
   const [newItemFile, setNewItemFile] = useState<File | null>(null);
   const [newItemPreview, setNewItemPreview] = useState<string | null>(null);
+  const [editedItemTitle, setEditedItemTitle] = useState('');
+  const skipRenameOnBlurRef = useRef(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -317,6 +320,26 @@ export default function App() {
     }
   };
 
+  const openRenameItem = (item: AestheticItem) => {
+    skipRenameOnBlurRef.current = false;
+    setEditingItem(item);
+    setEditedItemTitle(item.title);
+  };
+
+  const cancelRenameItem = () => {
+    skipRenameOnBlurRef.current = true;
+    setEditingItem(null);
+    setEditedItemTitle('');
+  };
+
+  const closeModals = () => {
+    setIsCatModalOpen(false);
+    setIsAddModalOpen(false);
+    setEditingItem(null);
+    setEditedItemTitle('');
+    resetItemForm();
+  };
+
   const addItem = async () => {
     if (!newItemFile && !newItemUrl.trim()) {
       setSyncMessage('Choose an image file or paste an image URL first.');
@@ -418,6 +441,47 @@ export default function App() {
     } else {
       setSyncMessage(null);
     }
+  };
+
+  const renameItem = async (force = false) => {
+    if (skipRenameOnBlurRef.current && !force) {
+      skipRenameOnBlurRef.current = false;
+      return;
+    }
+
+    if (!editingItem) return;
+    if (!editedItemTitle.trim()) {
+      cancelRenameItem();
+      return;
+    }
+
+    const nextTitle = editedItemTitle.trim();
+    const previousItems = items;
+
+    setIsSaving(true);
+    setItems((current) => current.map((item) => (
+      item.id === editingItem.id ? { ...item, title: nextTitle } : item
+    )));
+
+    if (user && user.id !== 'mock_user' && isDatabaseId(editingItem.id)) {
+      const { error } = await supabase
+        .from('items')
+        .update({ title: nextTitle })
+        .eq('id', editingItem.id)
+        .eq('user_id', user.id);
+
+      if (error) {
+        setItems(previousItems);
+        setSyncMessage('Could not rename that asset. Please try again.');
+        setIsSaving(false);
+        return;
+      }
+    }
+
+    setSyncMessage(null);
+    setEditingItem(null);
+    setEditedItemTitle('');
+    setIsSaving(false);
   };
 
   if (!user) {
@@ -587,12 +651,41 @@ export default function App() {
                             <button 
                               onClick={(e) => { e.stopPropagation(); deleteItem(item.id); }}
                               className="p-2 bg-white/10 backdrop-blur-md rounded-full text-white hover:bg-red-500 transition-colors"
+                              title="Delete asset"
                             >
                               <X className="w-4 h-4" />
                             </button>
                           </div>
                           <div>
-                            <p className="text-white font-medium text-xl leading-tight mb-2">{item.title}</p>
+                            {editingItem?.id === item.id ? (
+                              <input
+                                autoFocus
+                                value={editedItemTitle}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => setEditedItemTitle(e.target.value)}
+                                onBlur={() => renameItem()}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    skipRenameOnBlurRef.current = true;
+                                    renameItem(true);
+                                  }
+                                  if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    cancelRenameItem();
+                                  }
+                                }}
+                                className="mb-2 w-full rounded-xl bg-white/90 px-3 py-2 text-xl font-medium leading-tight text-fg outline-none ring-1 ring-white/40"
+                              />
+                            ) : (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); openRenameItem(item); }}
+                                className="mb-2 block max-w-full cursor-text text-left text-xl font-medium leading-tight text-white underline-offset-4 hover:underline"
+                                title="Click to rename"
+                              >
+                                {item.title}
+                              </button>
+                            )}
                             <div className="flex items-center gap-2">
                               <Folder className="w-3 h-3 text-white/40" />
                               <p className="text-white/60 text-[10px] uppercase tracking-[0.2em]">
@@ -626,7 +719,7 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => { setIsCatModalOpen(false); setIsAddModalOpen(false); resetItemForm(); }}
+              onClick={closeModals}
               className="absolute inset-0 bg-black/40 backdrop-blur-sm" 
             />
             <motion.div 
@@ -636,7 +729,7 @@ export default function App() {
               className="relative bg-white w-full max-w-lg rounded-[3rem] shadow-2xl overflow-hidden p-12"
             >
               <button 
-                onClick={() => { setIsCatModalOpen(false); setIsAddModalOpen(false); resetItemForm(); }}
+                onClick={closeModals}
                 className="absolute top-8 right-8 p-2 text-gray-300 hover:text-fg transition-colors"
               >
                 <X className="w-6 h-6" />
